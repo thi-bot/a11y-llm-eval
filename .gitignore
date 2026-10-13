@@ -436,3 +436,10 @@ FodyWeavers.xsd
 # Claude specific files
 .claude/
 CLAUDE.md
+
+# Harbor generated tasks and trial results
+harbor-tasks/
+harbor-pilot/
+harbor-custom/
+jobs/
+.a11y-history/

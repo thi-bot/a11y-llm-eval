@@ -1,308 +1,257 @@
 # A11y LLM Evaluation Harness and Dataset
 
-This is a research project to evaluate how well various LLM models generate accessible HTML content.
+Benchmark how well coding agents generate accessible web pages, using
+[Harbor](https://docs.harborframework.com/) to swap agents and run isolated trials.
+The benchmark keeps its existing prompt dimensions, instruction variants, skills,
+Playwright/axe-core checks, and detailed accessibility reports.
 
-## Problem
-LLMs currently generate code with accessibility bugs, resulting in blockers for people with disabilities and costly re-work and fixes downstream. 
+## Quick start
 
-## Goal
-Create a public test suite which can be used to benchmark how well various LLMs generates accessible HTML code. Eventually, it could also be used to help train models to generate more accessible code by default.
-
-## Methodology
-- Each test case contains a prompt to generate an HTML page to demonstrate a specific pattern or component.
-- All generations (control, instruction-set variants, and skills) are agentic sessions powered by the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) running inside a Docker sandbox. The agent can call built-in tools (e.g. file writes, shell commands) and iteratively refine its output.
-- **Control** uses the test prompt with no custom accessibility instructions, measuring baseline behavior. **Instruction-set variants** add custom instructions (delivered via `.github/copilot-instructions.md`). **Skills** use multi-turn conversations with explicit turn prompts and a mounted skill directory.
-- The resulting artifact directory is served over localhost HTTP and rendered in a real browser using Playwright (Chromium). Tests are executed against this rendered page.
-- The HTML is evaluated against axe-core, one of the most popular automated accessibility testing engines.
-- The HTML is also evaluated against a manually defined set of assertions, customized for the specific test case. This allows for more robust testing than just using axe-core.
-- Tests only pass if zero axe-core WCAG failures are found AND all *requirement* assertions pass. Best Practice (BP) assertion failures do not fail the test but are tracked separately.
-
-## Features
-- Python orchestrator built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/)
-- Every generation is an agentic Copilot session running inside a Docker sandbox we own (`config/copilot_sandbox/`)
-- Node.js Playwright + axe-core evaluation
-- Per-test prompts & injected JS assertions
-- HTML report summarizing performance
-- Token + cost tracking (tokens in/out/total, per-generation cost, aggregated per model)
-- Multi-sample generation with pass@k metrics (probability at least one passing generation in k draws)
-- Per-run Copilot session JSONL logs under `<run_dir>/copilot_logs/`
-
-## Sandbox & authentication
-
-The harness drives the official `@github/copilot` CLI inside a long-lived
-Docker container (built from `config/copilot_sandbox/Dockerfile`). The
-first `run` builds the image and brings the container up; subsequent runs
-reuse it.
-
-- **Docker is a hard dependency.** Install Docker Desktop (or Docker
-  Engine + Compose v2) before running.
-- **Authentication uses your existing dev login.** The harness
-  uses a named Docker volume (`copilot-auth`) so credentials stay inside
-  the container and are not exposed to the host. On first run the harness
-  verifies CLI connectivity and — if needed — runs `copilot login`
-  interactively in your terminal; the resulting token persists across
-  container rebuilds. `GH_TOKEN` / `GITHUB_TOKEN` environment variables
-  are forwarded per-`docker exec` as a CI/headless fallback.
-- **BYOK keys** flow through environment variables (`ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `AZURE_API_KEY`, `AZURE_API_BASE`,
-  `AZURE_API_VERSION`) and are forwarded into the container per session.
-- Override the workspace mount with `COPILOT_WORKSPACE` (host path mounted
-  as `/workspace`, which must contain any skill directories you reference).
-- Stop the container with
-  `docker compose -f config/copilot_sandbox/compose.yaml down`.
-
-## Sampling & pass@k Metrics
-You can request multiple independent generations ("samples") per (test, model). This enables computation of pass@k metrics similar to code evaluation benchmarks.
-
-### CLI Usage
-
-Step 1: Send prompts to the LLMs and generate HTML
-```bash
-python -m a11y_llm_tests.cli run \
-  --models-file config/models.yaml \
-  --out runs \
-  --samples 20 \
-```
-
-Step 2: Run the eval and generate the report
-```bash
-python -m a11y_llm_tests.cli evaluate \
-  <path to run directory> \
-  --k 1,5,10
-```
-
-Artifacts:
-- Each sample's artifact directory: `runs/<ts>/raw/<test>/<model>__s<idx>/` containing `index.html` plus any sibling CSS/JS files the agent wrote
-- Screenshots with analogous naming
-- `results.json` now includes per-sample records + an `aggregates` array with pass@k stats.
-- Report includes an aggregate pass@k table and grouped per-sample cards.
-
-Tips:
-- Increase `temperature` (or other diversity params) to reduce sample correlation.
-- Use `--disable-cache` if you want fresh generations even when prompt/model/seed repeat.
-
-### Custom instruction benchmarking (instruction sets)
-
-You can optionally benchmark multiple **custom instruction sets** against the **control** using the same test cases.
-
-- **Control**: the base system prompt with **no custom instructions**.
-- **Each instruction set is run separately** (instruction sets are not combined).
-- Instruction sets can use a **different sample count** than the control.
-
-Step 0: Start from the default instruction sets file
-
-- Use `config/default_instruction_sets.yaml` as a starting point.
-- The default set references `instructions/accessible-minimal.md` (a minimal hint that all output must be accessible), resolved relative to the YAML file's directory.
-
-You can also create your own instruction sets YAML file.
-
-```yaml
-instruction_sets:
-  - id: accessible_minimal
-    name: Accessible Minimal
-    description: Minimal reminder that all output must be accessible.
-    instructions_markdown: instructions/accessible-minimal.md
-    # samples: 10
-
-  - id: aria_guardrails
-    name: ARIA Guardrails
-    description: Strong ARIA guidance; avoid invalid ARIA.
-    instructions_markdown: instructions/aria_guardrails.md
-    samples: 20
-
-  - id: agentic_accessibility
-    name: Agentic Accessibility
-    description: Extra guidance for the Copilot agent.
-    instructions_markdown: instructions/accessible-minimal.md
-    samples: 5
-    agent:
-      limits:
-        timeout_s: 600
-```
-
-All generations now use the Copilot SDK's agent path inside the Docker
-sandbox; the instruction-set YAML format does not support
-`generation_mode`, and `agent.sandbox` is ignored (the sandbox is fixed
-to `config/copilot_sandbox/compose.yaml`). Only `agent.limits.timeout_s`
-(default 600) and `agent.limits.excluded_tools` are actively consumed;
-other limit keys are stored as metadata in `results.json`.
-
-Step 1: Generate control + instruction set variants
+You need Python 3.12+, Docker Engine/Desktop with Compose v2, and
+[uv](https://docs.astral.sh/uv/). Harbor installs coding agents inside containers;
+you do not need their CLIs on the host for API-key runs.
 
 ```bash
-python -m a11y_llm_tests.cli run \
-  --samples 5 \
-  --instruction-sets-file default_instruction_sets.yaml
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv tool install harbor==0.23.0
+
+# Export all prompts, instruction variants, and skills. No model calls.
+python -m a11y_llm_tests.harbor export --out harbor-tasks
+
+# Start small: one attempt per task. Set OPENAI_API_KEY in your environment.
+harbor run --path harbor-tasks \
+  --agent codex --model openai/gpt-5.4 \
+  --resume-trajectory --n-attempts 1 --n-concurrent 4 \
+  --job-name codex-pilot
+
+# Import the completed job and build the accessibility report.
+python -m a11y_llm_tests.harbor import jobs/codex-pilot \
+  --dataset harbor-tasks --out runs/codex-pilot --k 1
+
+python -m a11y_llm_tests.cli serve runs/codex-pilot --open
 ```
 
-Step 2: Evaluate and generate the report
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
+Use PowerShell line continuation or put each command on one line.
+
+Harbor runs generation and verification together. Exported datasets and report
+output directories must be new, so an export or import cannot overwrite a prior
+experiment. The report is self-contained, including generated assets, screenshots,
+verifier details and conversation previews.
+
+## Swap agents
+
+Use the same exported tasks with a different Harbor agent and model:
 
 ```bash
-python -m a11y_llm_tests.cli evaluate \
-  <path to run directory> \
-  --k 1,5,10
+# Set ANTHROPIC_API_KEY in your environment.
+harbor run --path harbor-tasks \
+  --agent claude-code --model anthropic/claude-sonnet-4-6 \
+  --resume-trajectory --n-attempts 1 --n-concurrent 4 \
+  --job-name claude-pilot
+
+# Combine jobs; agent/model/version/settings remain separate report entries.
+python -m a11y_llm_tests.harbor import jobs/codex-pilot jobs/claude-pilot \
+  --dataset harbor-tasks --out runs/agent-comparison --k 1
 ```
 
-Variant artifacts:
+Harbor also provides `copilot-cli`, `gemini-cli`, `opencode`, and other
+[agent integrations](https://docs.harborframework.com/agents/pre-integrated-agents).
+Use `harbor agent schema <agent>` for agent-specific options and credential
+requirements. Multi-turn skill tasks require native resume support when
+`--resume-trajectory` is enabled; Harbor rejects unsupported agents. Agents also
+need to support Harbor's `skills_dir` to evaluate skill discovery fairly.
 
-- Variant artifact directory: `runs/<ts>/raw_variants/<variant_id>/<test>/<model>__s<idx>/` containing `index.html` plus any sibling CSS/JS files the agent wrote
-- Agent conversation sidecar for instruction-set variants: `runs/<ts>/raw_variants/<variant_id>/<test>/<model>__s<idx>.agent.json`
-- Variant screenshots: `runs/<ts>/screenshots_variants/<variant_id>/<test>__<model>__s<idx>.png`
-
-Report:
-
-- The main tables reflect the **control** results.
-- Each instruction-set sample card shows a transcript preview and links to the saved conversation JSON.
-- If variants are present, the report includes an **“Instruction Benchmarks (vs Control)”** section with side-by-side metrics and deltas.
-
-
-### Skills benchmarking
-
-A **skill** is a self-contained package (a directory containing at minimum a `SKILL.md` plus any support files) exposed to the Copilot agent via the SDK's `skill_directories` parameter. Unlike instruction sets, a skill declares a sequence of user **turns**, and the agent's submission at the end of each turn is evaluated **independently** so the report can compare `control | turn 1 | turn 2 | …` per (test, model).
-
-- Skills always use the Copilot agent path. `generation_mode` is not supported.
-- The skill directory must live inside your workspace; the harness translates the host path to the container's `/workspace/<rel>` automatically.
-- Exactly one turn prompt must contain `{{test_case_prompt}}` (typically turn 1). Other supported tokens: `{{skill_id}}`, `{{skill_path}}`, `{{previous_submission}}`.
-- Skills and instruction sets share an id namespace and can be enabled together in the same run.
-- Per-turn caching: changing turn 2's prompt invalidates turn 2's cache but not turn 1's.
-
-Step 0: Start from the default skills file
-
-- Use `config/default_skills.yaml` as a starting point. It defines a single `building-accessible-ui` skill that first generates a page (turn 1) and then asks the agent to run accessibility tests, review the results, and remediate its own HTML (turn 2).
-
-Example `skills.yaml`:
-
-```yaml
-skills:
-  - id: building-accessible-ui
-    name: Building Accessible UI
-    description: Generate, then self-review using SKILL.md guidance.
-    skill_dir: skills/building-accessible-ui
-    # samples: 10                     # optional; defaults to --samples
-    agent:                            # optional limits passed to the Copilot session
-      limits:
-        timeout_s: 600
-    turns:
-      - id: generate
-        name: Generate
-        prompt: |
-          {{test_case_prompt}}
-      - id: review
-        name: Review
-        prompt: |
-          Add and run accessibility tests, review results, and remediate the HTML.
-          Fix any real accessibility issues you find. Leave correct markup
-          alone. Submit one corrected standalone HTML document as your final
-          answer. Do not wrap it in markdown fences or add commentary.
-```
-
-Step 1: Generate control + skill turns
+For an agent/model matrix, edit [config/harbor.example.yaml](config/harbor.example.yaml)
+and run:
 
 ```bash
-python -m a11y_llm_tests.cli run \
-  --samples 5 \
-  --skills-file config/default_skills.yaml
+harbor run --config config/harbor.example.yaml
 ```
 
-Step 2: Evaluate and generate the report
+That example requests **20 attempts** per task and agent. Start with one attempt
+while validating credentials and cost. Harbor controls concurrency, retries,
+timeouts, environment providers and agent versions. Pin agent versions in job
+configuration when comparing runs. Keep credentials in your environment; do not
+put secrets in task files or Docker build contexts.
 
-```bash
-python -m a11y_llm_tests.cli evaluate \
-  <path to run directory> \
-  --k 1,5,10
+Switching to Harbor does not itself provide subscription authentication. Follow
+the selected agent's Harbor authentication options; the commands above use direct
+API keys. A Codex subscription, OpenAI API billing and Copilot billing remain
+separate choices.
+
+## Benchmark matrix and methodology
+
+The current dataset expands to 32 prompt cases:
+
+- Six base test cases × two frameworks × two styles: 24 prompts.
+- Contact form × two frameworks × two styles × two validation states: 8 prompts.
+
+The default export creates 128 tasks: 32 prompts × control, minimal instructions,
+basic instructions, and the accessibility skill. The skill has two steps, so one
+attempt across all tasks produces 160 evaluated outputs **per agent/model**.
+
+- **Control:** the composed test prompt and common artifact instructions only.
+- **Instruction variants:** the same prompt with each instruction set appended
+  separately. This delivery is consistent across agents. It differs from the
+  legacy Copilot workflow's `.github/copilot-instructions.md`; record this
+  methodology change when comparing old and new runs.
+- **Skills:** Harbor makes the skill available through `environment.skills_dir`.
+  Generate and review run as separate steps in one persistent environment.
+  `--resume-trajectory` preserves the agent conversation. Both steps are scored;
+  failing generation does not prevent review. Harbor's trial-level reward is the
+  final step's score; the accessibility report preserves every step.
+
+Agents write a static site to `/app/output/index.html`, with optional sibling
+CSS/JS/assets. Harbor snapshots the whole output directory after each step. A
+fresh verifier container renders that snapshot over localhost HTTP and runs the
+existing assertions and axe-core. The agent image contains public Playwright and
+axe-core tooling for self-testing, but none of the benchmark's private assertions.
+The verifier's tests and results are not fed back to the review step.
+
+A reward of **1** requires zero axe-core WCAG failures and all requirement
+assertions passing. Best Practice failures and not-applicable assertions remain
+visible but do not fail the sample. Missing HTML, browser failures, and verifier
+exceptions cannot receive a passing reward. Interrupted trials and missing skill
+steps remain in the imported report as errors, rather than disappearing from the
+sample denominator.
+
+Use `--n-attempts 20` for repeated sampling. The importer computes pass@k only for
+k values no larger than the number of samples in a group. For example, use
+`--k 1,5,10` after collecting at least ten samples. There is no legacy generation
+cache on the Harbor path: new trials make fresh agent runs. See Harbor's
+[regrading documentation](https://docs.harborframework.com/jobs/regrade) for
+reusing generated artifacts without paying for another generation.
+
+For five independent runs of the frozen dataset with the agreed infrastructure
+retry policy, use Harbor's Python environment to run the campaign script:
+
+This campaign runner requires Linux or macOS (it uses `fcntl` for locking) and
+a host Codex login saved in `auth.json`. It sets `CODEX_FORCE_AUTH_JSON=1` to use
+that login. The general Harbor commands above use API keys instead.
+
+For a new experiment, export the dataset first, then freeze its checksums once
+with the following command. Keep this file and the dataset at the same path
+throughout the campaign; do not regenerate the baseline when resuming a run.
+
+```sh
+~/.local/share/uv/tools/harbor/bin/python - <<'PY'
+import json
+from pathlib import Path
+from harbor.models.task.task import Task
+
+dataset = Path("harbor-tasks").resolve()
+manifest = json.loads((dataset / "manifest.json").read_text())
+checksums = {
+    str(dataset / name): Task(dataset / name).checksum
+    for name in manifest["tasks"]
+}
+with (dataset / "reproducibility-task-checksums.json").open("x") as output:
+    json.dump(checksums, output, indent=2)
+    output.write("\n")
+PY
 ```
 
-Skill artifacts:
+```sh
+~/.local/share/uv/tools/harbor/bin/python scripts/run_harbor_campaign.py \
+  --out runs/codex-luna-sol-five-runs \
+  --models openai/gpt-6-luna openai/gpt-6.1-sol
+```
 
-- Per-turn artifact directory: `runs/<ts>/raw_skills/<skill_id>/<test>/<model>__s<idx>__t<turn_index>/` containing `index.html` plus any sibling CSS/JS files the agent wrote for that turn
-- One stitched conversation sidecar per sample: `runs/<ts>/raw_skills/<skill_id>/<test>/<model>__s<idx>.agent.json`
-- Per-turn screenshots: `runs/<ts>/screenshots_skills/<skill_id>/<test>__<model>__s<idx>__t<turn_index>.png`
-- `results.json` emits one record per (test, model, sample, turn) with `prompt_variant_kind = "skill"`, `turn_id`, `turn_index`, and `turn_count_total`, plus one aggregate per (test, model, skill, turn).
+The campaign uses Codex 0.160.1, medium reasoning, and four concurrent tasks.
+It requires `harbor-tasks/reproducibility-task-checksums.json` from the frozen
+baseline. Each model receives five fresh runs of all variants. Model order
+alternates between rounds. Earlier runs are kept separate.
 
-Report:
+Confirmed transient network/setup failures receive at most two additional
+attempts. Verifier infrastructure failures reuse saved outputs when the full
+task was recorded; otherwise the affected task restarts in a fresh environment.
+Accessibility failures, broken generated pages, missing output, and agent time
+limits do not earn additional attempts. Unknown errors require inspection;
+authentication, unavailable models, and usage limits stop the campaign.
 
-- A new **Skills** section renders one table per configured skill with dynamic columns: `Control | turn 1 | … | turn N | Δ last vs control | Δ last vs turn 1`.
-- The skill details panel previews each turn's prompt template and the mounted `SKILL.md`.
+Each attempt retains its original logs and usage data. Selection manifests
+identify exactly one final outcome per task; retries never increase the sample
+count. Exhausted infrastructure errors mark a run incomplete and prevent a final
+five-run comparison. The headline metric is the arithmetic mean of five run
+pass rates per model and variant/turn, with median and sample standard deviation
+as secondary statistics. Raw multi-step usage is retained without summing
+potentially cumulative token or cost counters.
 
-### Combined run (instruction sets + skills)
+The output directory contains `protocol.json`, `status.json`, original Harbor
+jobs, per-run attempt/selection records and HTML reports, and per-model
+`comparison/comparison.json` and CSV files when all five runs are complete.
+Restarting the script reuses finished jobs and preserves the retry budget;
+interrupted jobs stop for inspection rather than deleting partial artifacts.
 
-Both flags can be supplied at once; each variant is benchmarked separately against the same control, and each renders its own section in the report.
+## Customize the dataset
+
+The existing YAML files remain the source of truth:
+
+- [config/prompt_dimensions.yaml](config/prompt_dimensions.yaml): global framework/style dimensions.
+- `test_cases/<case>/prompt.yaml` and `test.js`: prompts and accessibility assertions.
+- [config/default_instruction_sets.yaml](config/default_instruction_sets.yaml): instruction variants.
+- [config/default_skills.yaml](config/default_skills.yaml): skill directory and ordered user turns.
+
+Export a small control-only dataset, or supply alternate configurations:
 
 ```bash
-python -m a11y_llm_tests.cli run \
-  --samples 5 \
+python -m a11y_llm_tests.harbor export \
+  --out harbor-pilot --control-only \
+  --test-cases simple-contact-form,modal-dialog
+
+python -m a11y_llm_tests.harbor export \
+  --out harbor-custom \
   --instruction-sets-file config/default_instruction_sets.yaml \
-  --skills-file config/default_skills.yaml
-
-python -m a11y_llm_tests.cli evaluate \
-  <path to run directory> \
-  --k 1,5
+  --skills-file config/default_skills.yaml \
+  --agent-timeout 900
 ```
 
-This produces, in a single run directory:
+An empty `instruction_sets: []` or `skills: []` file disables that family while
+retaining control. Each export includes `manifest.json` for the report importer.
+Retain the exported dataset used by a job; changing source YAML does not mutate
+that experiment.
 
-- `raw/…` — control sample directories, each containing `index.html` plus any sibling assets
-- `raw_variants/<instruction_set_id>/…` — instruction-set sample directories plus one `.agent.json` per sample
-- `raw_skills/<skill_id>/…` — skill turn directories plus one stitched `.agent.json` per sample
-- A report with three comparison sections: Control summary, **Instruction Benchmarks (vs Control)**, and **Skills (vs Control)**.
+Harbor uses native `task.toml`, `instruction.md`, Docker build contexts and verifier
+scripts. There is no custom agent wrapper. Per-variant `agent.limits.timeout_s`
+maps to Harbor's timeout; other legacy agent options are rejected rather than
+silently ignored. Set sample counts with Harbor's `--n-attempts`. For different
+counts by variant, run separate jobs with `--include-task-name '*--control--*'`
+or the corresponding variant name, then import those jobs together. Remove
+legacy `samples` overrides from YAML before exporting.
 
+Skill turn templates support `{{test_case_prompt}}`, `{{skill_id}}` and
+`{{skill_path}}`. Harbor instructions are static, so `{{previous_submission}}`
+is rejected: instruct the agent to read `/app/output/index.html` instead.
 
-## Quick Start
+## Results and cost accounting
 
-### Prerequisites
+Harbor retains its native trial results and trajectories under `jobs/`. The
+importer creates the existing `results.json` and HTML report under `runs/`,
+qualifying each model with its agent, version and configuration. This prevents
+scores from different agent configurations being merged.
 
-- **Python 3.11+** and **Node.js 18+**
-- **Docker** — the generation step runs a Copilot sandbox container.
-  Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS/Windows) or Docker Engine (Linux) and make sure `docker` is on your PATH.
-- **GitHub CLI** — used to authenticate the Copilot sandbox.
-  Install with `brew install gh` (macOS), `winget install GitHub.cli` (Windows), or see [cli.github.com](https://cli.github.com). Then run:
-  ```
-  gh auth login
-  ```
-  Alternatively, set a `GITHUB_TOKEN` (or `GH_TOKEN`) environment variable with a token that has Copilot access.
+Single-step token/cost fields are imported when Harbor provides them. For
+multi-step skills, token and cost fields are kept only in Harbor result sidecars
+because agent adapters differ in cumulative versus per-step accounting. Reported
+costs can be estimates rather than subscription charges; use provider billing for
+actual spend. Missing usage is left unknown, not treated as free usage.
 
-### macOS / Linux
+## Development and legacy runs
+
+For host-side verifier development and the existing fixture suite:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
 python scripts/install_node_deps.py
-
-cp config/models.yaml.example config/models.yaml   # then add your API keys
-
-# Generate HTML samples (writes to runs/<timestamp>/)
-python -m a11y_llm_tests.cli run --samples 1
-
-# Evaluate the generated samples and build the HTML report
-python -m a11y_llm_tests.cli evaluate runs/latest
+python -m pytest
 ```
 
-### Windows (PowerShell)
-
-```powershell
-python -m venv .venv; .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python scripts\install_node_deps.py
-
-copy config\models.yaml.example config\models.yaml   # then add your API keys
-
-# Generate HTML samples (writes to runs\<timestamp>\)
-python -m a11y_llm_tests.cli run --samples 1
-
-# Evaluate the generated samples and build the HTML report
-python -m a11y_llm_tests.cli evaluate runs\latest
-```
-
-After evaluation, open `runs/latest/index.html` in a browser for the full report.
-Detailed per-sample results are saved to `runs/latest/results.json`.
-
-You can also serve an existing run directory over localhost HTTP:
-
-```bash
-python -m a11y_llm_tests.cli serve runs/latest --open
-```
-
-This serves the full run directory, including `index.html`, `results.json`, screenshots, raw artifacts, and conversation sidecars.
+The previous `python -m a11y_llm_tests.cli run` path is retained for reproducing
+older Copilot SDK experiments. Install `requirements-copilot.txt` for that path.
+See [the legacy Copilot workflow](docs/legacy-copilot.md). New runs should use the
+Harbor workflow above.
 
 ## Adding a Test Case
 Create a new folder under `test_cases/`:

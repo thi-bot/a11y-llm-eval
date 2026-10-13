@@ -1,21 +1,20 @@
 # Default skills for benchmarking against control.
 # Use with:
-#   python -m a11y_llm_tests.cli run --skills-file config/default_skills.yaml ...
+#   python -m a11y_llm_tests.harbor export --skills-file config/default_skills.yaml
 #
-# Each skill directory (containing SKILL.md and any support files) is part of the
-# repo workspace volume mounted at /workspace inside the container. The Copilot SDK's
-# skill_directories parameter is pointed at the parent of the skill directory so it
-# can discover SKILL.md. The agent runs an N-turn conversation; its submission at the
-# end of each turn is captured and evaluated as its own artifact so the report can
-# show control | turn 1 | turn 2 | ... deltas.
+# Harbor copies each skill directory (SKILL.md and support files) into /skills
+# and exposes it through environment.skills_dir. Use --resume-trajectory for
+# a continuous agent conversation. Every turn's submission is captured and
+# evaluated separately so the report can show control and per-turn deltas.
 #
 # Template tokens supported in turn prompts:
 #   {{test_case_prompt}}   - the user prompt composed from prompt.yaml (exactly one
 #                            turn must reference this, typically turn 0).
 #   {{skill_id}}           - the skill id.
 #   {{skill_path}}         - absolute container path to the skill directory
-#                            (e.g. /workspace/config/skills/building-accessible-ui).
-#   {{previous_submission}} - the HTML submitted on the previous turn (turns >= 1).
+#                            (e.g. /skills/building-accessible-ui).
+#   {{previous_submission}} - legacy Copilot only. With Harbor, instruct the
+#                            agent to read /app/output/index.html instead.
 
 skills:
   - id: building-accessible-ui
@@ -24,7 +23,7 @@ skills:
       A skill that implicitly steers generation toward accessible HTML and can be explicitly invoked to review and remediate previously produced HTML. This skill provides expert guidance on accessibility best practices, including semantic HTML, ARIA roles, and color contrast.
     url: https://github.com/microsoft/a11y-llm-eval/tree/main/config/skills/building-accessible-ui
     skill_dir: skills/building-accessible-ui
-    # Optional. Defaults to --samples.
+    # Legacy Copilot only. With Harbor, use --n-attempts instead.
     # samples: 3
     turns:
       - id: generate

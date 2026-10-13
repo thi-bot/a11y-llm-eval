@@ -1,6 +1,8 @@
 # Default instruction sets for benchmarking (vs control).
 # Use with:
-#   python -m a11y_llm_tests.cli run --instruction-sets-file config/default_instruction_sets.yaml ...
+#   python -m a11y_llm_tests.harbor export --instruction-sets-file config/default_instruction_sets.yaml
+# Set sample counts using Harbor's --n-attempts. The samples overrides below
+# apply only to the legacy Copilot runner and must stay disabled for Harbor.
 
 instruction_sets:
   - id: accessible_minimal

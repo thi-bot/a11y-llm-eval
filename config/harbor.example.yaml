@@ -1,0 +1,22 @@
+# Native Harbor job configuration. Export harbor-tasks before running this.
+# Run from the repository root: harbor run --config config/harbor.example.yaml
+job_name: a11y-agent-comparison
+jobs_dir: jobs
+n_attempts: 20
+n_concurrent_trials: 4
+retry:
+  max_retries: 0
+environment:
+  type: docker
+datasets:
+  - path: harbor-tasks
+agents:
+  - name: codex
+    model_name: openai/gpt-5.4
+    resume_trajectory: true
+  - name: claude-code
+    model_name: anthropic/claude-sonnet-4-6
+    resume_trajectory: true
+# For Copilot CLI, use name: copilot-cli with a model it supports.
+# Each agent handles credentials using Harbor's own integration. API keys
+# belong in your environment, never in this file or an exported task image.
